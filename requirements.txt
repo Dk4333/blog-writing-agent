@@ -1,0 +1,29 @@
+# Core LLM / Agent framework
+langchain==1.2.15
+langchain-community==0.4.1
+langchain-core==1.2.31
+langchain-openai==1.1.14
+langchain-text-splitters==1.1.2
+langgraph==1.1.6
+langgraph-checkpoint==4.0.2
+langgraph-prebuilt==1.0.9
+langgraph-sdk==0.3.13
+
+# LLM provider
+openai==2.32.0
+
+# Search / Research
+tavily-python==0.7.23
+
+# Frontend
+streamlit==1.56.0
+
+# Data
+pandas==3.0.2
+
+# Validation
+pydantic==2.13.2
+pydantic-settings==2.13.1
+
+# Utilities
+python-dotenv==1.2.2
