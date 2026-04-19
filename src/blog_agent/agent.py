@@ -467,8 +467,10 @@ def generate_and_place_images(state: State) -> dict:
 
     # If no images requested, just write merged markdown
     if not image_specs:
+        out_dir = Path("outputs")
+        out_dir.mkdir(exist_ok=True)
         filename = f"{_safe_slug(plan.blog_title)}.md"
-        Path(filename).write_text(md, encoding="utf-8")
+        (out_dir / filename).write_text(md, encoding="utf-8")
         return {"final": md}
 
     images_dir = Path("images")
@@ -502,8 +504,10 @@ def generate_and_place_images(state: State) -> dict:
         img_md = f"![{spec['alt']}](images/{filename})\n*{spec['caption']}*"
         md = md.replace(placeholder, img_md)
 
+    out_dir = Path("outputs")
+    out_dir.mkdir(exist_ok=True)
     filename = f"{_safe_slug(plan.blog_title)}.md"
-    Path(filename).write_text(md, encoding="utf-8")
+    (out_dir / filename).write_text(md, encoding="utf-8")
     return {"final": md}
 
 # build reducer subgraph

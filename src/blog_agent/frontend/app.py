@@ -161,13 +161,30 @@ def render_markdown_with_local_images(md: str):
 # -----------------------------
 def list_past_blogs() -> List[Path]:
     """
-    Returns .md files in current working directory, newest first.
-    Filters out obvious non-blog markdown files if needed.
+    Returns .md files from outputs/ and cwd root, newest first.
+    Excludes README.md.
     """
     cwd = Path(".")
-    files = [p for p in cwd.glob("*.md") if p.is_file()]
-    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return files
+    files: List[Path] = []
+    # outputs/ subdirectory (preferred save location)
+    outputs_dir = cwd / "outputs"
+    if outputs_dir.is_dir():
+        files.extend(p for p in outputs_dir.glob("*.md") if p.is_file())
+    # root-level md files (legacy / fallback)
+    files.extend(
+        p for p in cwd.glob("*.md")
+        if p.is_file() and p.name.lower() != "readme.md"
+    )
+    # deduplicate, sort newest first
+    seen = set()
+    deduped = []
+    for p in files:
+        key = p.resolve()
+        if key not in seen:
+            seen.add(key)
+            deduped.append(p)
+    deduped.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return deduped
 
 
 def read_md_file(p: Path) -> str:
@@ -243,6 +260,7 @@ with st.sidebar:
                 }
                 # also update the topic input to the title (best-effort) without changing UI
                 st.session_state["topic_prefill"] = extract_title_from_md(md_text, selected_md_file.stem)
+                st.rerun()
 
     
 
