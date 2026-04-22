@@ -1,3 +1,6 @@
+# Local package (src/ layout — needed for Streamlit Cloud)
+-e .
+
 # Core LLM / Agent framework
 langchain==1.2.15
 langchain-community==0.4.1

@@ -18,6 +18,15 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Streamlit Cloud: inject secrets into env vars if running inside Streamlit
+try:
+    import streamlit as _st
+    for _k, _v in _st.secrets.items():
+        if isinstance(_v, str):
+            os.environ.setdefault(_k, _v)
+except Exception:
+    pass
+
 # ============================================================
 # Blog Writer (Router → (Research?) → Orchestrator → Workers → ReducerWithImages)
 # Patches image capability using your 3-node reducer flow:

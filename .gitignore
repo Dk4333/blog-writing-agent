@@ -19,6 +19,9 @@ build/
 .env
 .env.local
 
+# Streamlit secrets (never commit real keys)
+.streamlit/secrets.toml
+
 # Jupyter
 .ipynb_checkpoints/
 *.ipynb_checkpoints
