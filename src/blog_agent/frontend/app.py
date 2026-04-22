@@ -225,44 +225,34 @@ with st.sidebar:
     past_files = list_past_blogs()
     if not past_files:
         st.caption("No saved blogs found (*.md in current folder).")
-        selected_md_file = None
     else:
-        # Build labels from file name + (optional) parsed title
-        options: List[str] = []
-        file_by_label: Dict[str, Path] = {}
+        # Build labels
+        labels: List[str] = []
         for p in past_files[:50]:
             try:
                 md_text = read_md_file(p)
                 title = extract_title_from_md(md_text, p.stem)
             except Exception:
                 title = p.stem
-            label = f"{title}  ·  {p.name}"
-            options.append(label)
-            file_by_label[label] = p
+            labels.append(title)
 
-        selected_label = st.radio(
-            "Select a blog to load",
-            options=options,
-            index=0,
+        selected_idx = st.selectbox(
+            "Select a blog",
+            options=range(len(labels)),
+            format_func=lambda i: labels[i],
             label_visibility="collapsed",
         )
-        selected_md_file = file_by_label.get(selected_label)
 
         if st.button("📂 Load selected blog"):
-            if selected_md_file:
-                md_text = read_md_file(selected_md_file)
-                # Load into session_state as if it were a run output
-                st.session_state["last_out"] = {
-                    "plan": None,          # old files don't include plan
-                    "evidence": [],        # old files don't include evidence
-                    "image_specs": [],     # optional (not persisted)
-                    "final": md_text,      # markdown body
-                }
-                # also update the topic input to the title (best-effort) without changing UI
-                st.session_state["topic_prefill"] = extract_title_from_md(md_text, selected_md_file.stem)
-                st.rerun()
-
-    
+            p = past_files[selected_idx]
+            md_text = read_md_file(p)
+            st.session_state["last_out"] = {
+                "plan": None,
+                "evidence": [],
+                "image_specs": [],
+                "final": md_text,
+            }
+            st.rerun()
 
 # Keep your topic input as-is; optionally prefill for next run after loading a blog
 if "topic_prefill" in st.session_state and isinstance(st.session_state["topic_prefill"], str):
@@ -433,7 +423,7 @@ if out:
                 mime="text/markdown",
             )
 
-            bundle = bundle_zip(final_md, md_filename, Path("images"))
+            bundle = bundle_zip(final_md, md_filename, Path("outputs/images"))
             st.download_button(
                 "📦 Download Bundle (MD + images)",
                 data=bundle,
@@ -445,7 +435,7 @@ if out:
     with tab_images:
         st.subheader("Images")
         specs = out.get("image_specs") or []
-        images_dir = Path("images")
+        images_dir = Path("outputs/images")
 
         if not specs and not images_dir.exists():
             st.info("No images generated for this blog.")

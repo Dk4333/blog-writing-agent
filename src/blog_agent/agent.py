@@ -473,8 +473,8 @@ def generate_and_place_images(state: State) -> dict:
         (out_dir / filename).write_text(md, encoding="utf-8")
         return {"final": md}
 
-    images_dir = Path("images")
-    images_dir.mkdir(exist_ok=True)
+    images_dir = Path("outputs/images")
+    images_dir.mkdir(parents=True, exist_ok=True)
 
     for spec in image_specs:
         placeholder = spec["placeholder"]
@@ -501,7 +501,7 @@ def generate_and_place_images(state: State) -> dict:
                 md = md.replace(placeholder, prompt_block)
                 continue
 
-        img_md = f"![{spec['alt']}](images/{filename})\n*{spec['caption']}*"
+        img_md = f"![{spec['alt']}](outputs/images/{filename})\n*{spec['caption']}*"
         md = md.replace(placeholder, img_md)
 
     out_dir = Path("outputs")
