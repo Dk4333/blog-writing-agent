@@ -16,6 +16,13 @@ import streamlit as st
 # Import your compiled LangGraph app
 # -----------------------------
 from blog_agent.agent import app
+from blog_agent.database import db_available, init_db, save_run, update_run, list_runs, get_run
+from blog_agent.github_publisher import github_available, publish_to_github
+from blog_agent.rewriter import rewrite_with_feedback
+
+# Initialize database table on startup
+if db_available():
+    init_db()
 
 
 # -----------------------------
@@ -218,41 +225,69 @@ with st.sidebar:
     as_of = st.date_input("As-of date", value=date.today())
     run_btn = st.button("🚀 Generate Blog", type="primary")
 
-    # ✅ NEW: Past blogs list (keeps everything else intact)
+    # Recent blogs
     st.divider()
-    st.subheader("Past blogs")
+    st.subheader("Recent blogs")
 
-    past_files = list_past_blogs()
-    if not past_files:
-        st.caption("No saved blogs found (*.md in current folder).")
+    if db_available():
+        try:
+            recent = list_runs(limit=10)
+            if not recent:
+                st.caption("No blogs yet.")
+            else:
+                _labels = [r["blog_title"] or r["topic"] for r in recent]
+                _sel = st.selectbox(
+                    "Recent",
+                    options=range(len(_labels)),
+                    format_func=lambda i: _labels[i],
+                    label_visibility="collapsed",
+                    key="sidebar_recent",
+                )
+                if st.button("📂 Load selected blog"):
+                    _run = get_run(recent[_sel]["id"])
+                    if _run:
+                        st.session_state["last_out"] = {
+                            "plan": None,
+                            "evidence": [],
+                            "image_specs": [],
+                            "final": _run.get("final_md", ""),
+                        }
+                        st.session_state["blog_status"] = _run.get("status", "draft")
+                        st.session_state["run_id"] = _run["id"]
+                        st.rerun()
+        except Exception:
+            st.caption("Could not load recent blogs.")
     else:
-        # Build labels
-        labels: List[str] = []
-        for p in past_files[:50]:
-            try:
+        past_files = list_past_blogs()
+        if not past_files:
+            st.caption("No saved blogs found.")
+        else:
+            _labels = []
+            for p in past_files[:20]:
+                try:
+                    md_text = read_md_file(p)
+                    title = extract_title_from_md(md_text, p.stem)
+                except Exception:
+                    title = p.stem
+                _labels.append(title)
+
+            _sel = st.selectbox(
+                "Select a blog",
+                options=range(len(_labels)),
+                format_func=lambda i: _labels[i],
+                label_visibility="collapsed",
+            )
+            if st.button("📂 Load selected blog"):
+                p = past_files[_sel]
                 md_text = read_md_file(p)
-                title = extract_title_from_md(md_text, p.stem)
-            except Exception:
-                title = p.stem
-            labels.append(title)
-
-        selected_idx = st.selectbox(
-            "Select a blog",
-            options=range(len(labels)),
-            format_func=lambda i: labels[i],
-            label_visibility="collapsed",
-        )
-
-        if st.button("📂 Load selected blog"):
-            p = past_files[selected_idx]
-            md_text = read_md_file(p)
-            st.session_state["last_out"] = {
-                "plan": None,
-                "evidence": [],
-                "image_specs": [],
-                "final": md_text,
-            }
-            st.rerun()
+                st.session_state["last_out"] = {
+                    "plan": None,
+                    "evidence": [],
+                    "image_specs": [],
+                    "final": md_text,
+                }
+                st.session_state["blog_status"] = "draft"
+                st.rerun()
 
 # Keep your topic input as-is; optionally prefill for next run after loading a blog
 if "topic_prefill" in st.session_state and isinstance(st.session_state["topic_prefill"], str):
@@ -262,10 +297,13 @@ if "topic_prefill" in st.session_state and isinstance(st.session_state["topic_pr
 # Storage for latest run
 if "last_out" not in st.session_state:
     st.session_state["last_out"] = None
+for _key, _default in [("blog_status", None), ("run_id", None), ("show_editor", False), ("show_rewrite", False)]:
+    if _key not in st.session_state:
+        st.session_state[_key] = _default
 
 # Layout
-tab_plan, tab_evidence, tab_preview, tab_images, tab_logs = st.tabs(
-    ["🧩 Plan", "🔎 Evidence", "📝 Markdown Preview", "🖼️ Images", "🧾 Logs"]
+tab_plan, tab_evidence, tab_preview, tab_images, tab_history, tab_logs = st.tabs(
+    ["🧩 Plan", "🔎 Evidence", "📝 Markdown Preview", "🖼️ Images", "📋 History", "🧾 Logs"]
 )
 
 logs: List[str] = []
@@ -329,6 +367,31 @@ if run_btn:
         elif kind == "final":
             out = payload
             st.session_state["last_out"] = out
+            st.session_state["blog_status"] = "draft"
+            st.session_state["run_id"] = None
+            st.session_state["show_editor"] = False
+            st.session_state["show_rewrite"] = False
+
+            # Save to database
+            if db_available():
+                try:
+                    plan_obj = out.get("plan")
+                    _title = _kind = ""
+                    if hasattr(plan_obj, "blog_title"):
+                        _title, _kind = plan_obj.blog_title, plan_obj.blog_kind
+                    elif isinstance(plan_obj, dict):
+                        _title = plan_obj.get("blog_title", "")
+                        _kind = plan_obj.get("blog_kind", "")
+                    st.session_state["run_id"] = save_run(
+                        topic=topic.strip(),
+                        blog_title=_title,
+                        mode=out.get("mode", ""),
+                        blog_kind=_kind,
+                        final_md=out.get("final", ""),
+                    )
+                except Exception as exc:
+                    log(f"[db] save failed: {exc}")
+
             status.update(label="✅ Done", state="complete", expanded=False)
             log("[final] received final state")
 
@@ -431,6 +494,95 @@ if out:
                 mime="application/zip",
             )
 
+            # --- Review & Publish ---
+            st.divider()
+            st.subheader("Review & Publish")
+
+            _status = st.session_state.get("blog_status") or "draft"
+            _icons = {"draft": "🟡", "approved": "🟢", "published": "🚀"}
+            st.write(f"**Status:** {_icons.get(_status, '⚪')} {_status}")
+
+            if _status != "published":
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    if st.button("✅ Approve", disabled=(_status == "approved")):
+                        st.session_state["blog_status"] = "approved"
+                        if st.session_state.get("run_id") and db_available():
+                            update_run(st.session_state["run_id"], status="approved")
+                        st.rerun()
+                with c2:
+                    if st.button("✏️ Edit"):
+                        st.session_state["show_editor"] = not st.session_state.get("show_editor", False)
+                        st.session_state["show_rewrite"] = False
+                        st.rerun()
+                with c3:
+                    if st.button("🔄 Rewrite"):
+                        st.session_state["show_rewrite"] = not st.session_state.get("show_rewrite", False)
+                        st.session_state["show_editor"] = False
+                        st.rerun()
+
+            # Edit panel
+            if st.session_state.get("show_editor"):
+                edited = st.text_area("Edit markdown", value=final_md, height=500, key="md_editor")
+                if st.button("💾 Save edits"):
+                    st.session_state["last_out"]["final"] = edited
+                    st.session_state["show_editor"] = False
+                    st.session_state["blog_status"] = "draft"
+                    if st.session_state.get("run_id") and db_available():
+                        update_run(st.session_state["run_id"], final_md=edited, status="draft")
+                    st.rerun()
+
+            # Rewrite panel
+            if st.session_state.get("show_rewrite"):
+                feedback = st.text_area("What should be changed?", height=150, key="rewrite_fb")
+                if st.button("🔄 Submit feedback") and feedback.strip():
+                    with st.spinner("Rewriting…"):
+                        new_md = rewrite_with_feedback(final_md, feedback.strip())
+                    st.session_state["last_out"]["final"] = new_md
+                    st.session_state["show_rewrite"] = False
+                    st.session_state["blog_status"] = "draft"
+                    if st.session_state.get("run_id") and db_available():
+                        update_run(st.session_state["run_id"], final_md=new_md, status="draft")
+                    st.rerun()
+
+            # GitHub push (after approval)
+            if _status == "approved" and github_available():
+                st.divider()
+                with st.expander("🚀 Push to GitHub"):
+                    gh_repo = st.text_input(
+                        "Repository (owner/repo)",
+                        value=os.getenv("GITHUB_REPO", ""),
+                        key="gh_repo",
+                    )
+                    gh_branch = st.text_input("Branch", value=os.getenv("GITHUB_BRANCH", "main"), key="gh_branch")
+                    gh_path = st.text_input("File path in repo", value=f"posts/{md_filename}", key="gh_path")
+                    if st.button("📤 Push"):
+                        if not gh_repo.strip():
+                            st.error("Enter a repository (e.g. user/my-blog).")
+                        else:
+                            try:
+                                with st.spinner("Pushing…"):
+                                    result = publish_to_github(
+                                        content=final_md,
+                                        file_path=gh_path.strip(),
+                                        repo=gh_repo.strip(),
+                                        commit_message=f"Add blog: {blog_title}",
+                                        branch=gh_branch.strip(),
+                                    )
+                                html_url = result.get("html_url", "")
+                                st.session_state["blog_status"] = "published"
+                                if st.session_state.get("run_id") and db_available():
+                                    update_run(
+                                        st.session_state["run_id"],
+                                        status="published",
+                                        github_pushed=True,
+                                        github_url=html_url,
+                                    )
+                                st.success(f"Published! [View on GitHub]({html_url})")
+                                st.rerun()
+                            except Exception as exc:
+                                st.error(f"Push failed: {exc}")
+
     # --- Images tab ---
     with tab_images:
         st.subheader("Images")
@@ -460,6 +612,46 @@ if out:
                         file_name="images.zip",
                         mime="application/zip",
                     )
+
+    # --- History tab ---
+    with tab_history:
+        st.subheader("Blog History")
+        if not db_available():
+            st.info("Set `DATABASE_URL` to enable blog history (e.g. Neon PostgreSQL).")
+        else:
+            try:
+                runs = list_runs(limit=50)
+                if not runs:
+                    st.info("No blogs generated yet.")
+                else:
+                    df_hist = pd.DataFrame(runs)
+                    df_hist["created_at"] = pd.to_datetime(df_hist["created_at"]).dt.strftime("%Y-%m-%d %H:%M")
+                    st.dataframe(
+                        df_hist[["id", "blog_title", "mode", "blog_kind", "status", "github_pushed", "created_at"]],
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                    _run_labels = [f"{r['blog_title'] or r['topic']} ({r['status']})" for r in runs]
+                    _hist_idx = st.selectbox(
+                        "Load a blog",
+                        range(len(_run_labels)),
+                        format_func=lambda i: _run_labels[i],
+                        key="hist_sel",
+                    )
+                    if st.button("📂 Load from history", key="hist_load"):
+                        _run = get_run(runs[_hist_idx]["id"])
+                        if _run:
+                            st.session_state["last_out"] = {
+                                "plan": None,
+                                "evidence": [],
+                                "image_specs": [],
+                                "final": _run.get("final_md", ""),
+                            }
+                            st.session_state["blog_status"] = _run.get("status", "draft")
+                            st.session_state["run_id"] = _run["id"]
+                            st.rerun()
+            except Exception as exc:
+                st.error(f"Failed to load history: {exc}")
 
     # --- Logs tab ---
     with tab_logs:

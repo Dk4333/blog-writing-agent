@@ -7,16 +7,17 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import TypedDict, List, Optional, Literal, Annotated
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import Send
 
-from langchain_openai import ChatOpenAI
+from langchain_groq import ChatGroq
 from langchain_core.messages import SystemMessage, HumanMessage
 from dotenv import load_dotenv
+from pathlib import Path
 
-load_dotenv()
+load_dotenv(dotenv_path=Path(__file__).resolve().parents[2] / ".env")
 
 # Streamlit Cloud: inject secrets into env vars if running inside Streamlit
 try:
@@ -37,7 +38,7 @@ except Exception:
 # -----------------------------
 # 1) Schemas
 # -----------------------------
-class Task(BaseModel):
+class Task(BaseModel): # this is the schema for each section of the blog, which will be created in orchestrator and stored in state, then accessed by worker to write that section
     id: int
     title: str
     goal: str = Field(..., description="One sentence describing what the reader should do/understand.")
@@ -50,7 +51,7 @@ class Task(BaseModel):
     requires_code: bool = False
 
 
-class Plan(BaseModel):
+class Plan(BaseModel): # this is the output of orchestrator node, which contains the overall plan for the blog post, including the list of tasks (sections) to be written by workers; stored in state and accessed by worker and reducer
     blog_title: str
     audience: str
     tone: str
@@ -73,6 +74,18 @@ class RouterDecision(BaseModel):
     reason: str
     queries: List[str] = Field(default_factory=list)
     max_results_per_query: int = Field(5)
+
+    @field_validator("needs_research", mode="before")
+    @classmethod
+    def _coerce_bool(cls, v: object) -> bool:
+        if isinstance(v, str):
+            return v.strip().lower() == "true"
+        return v
+
+    @field_validator("max_results_per_query", mode="before")
+    @classmethod
+    def _coerce_int(cls, v: object) -> int:
+        return int(v)
 
 
 class EvidencePack(BaseModel):
@@ -108,7 +121,7 @@ class State(TypedDict):
     as_of: str
     recency_days: int
 
-    # workers
+    # workers  here we store output of each worker as list of (task_id, section_md) tuples; reducer will merge them based on task_id order
     sections: Annotated[List[tuple[int, str]], operator.add]  # (task_id, section_md)
 
     # reducer/image
@@ -122,7 +135,7 @@ class State(TypedDict):
 # -----------------------------
 # 2) LLM
 # -----------------------------
-llm = ChatOpenAI(model="gpt-4.1-mini")
+llm = ChatGroq(model="meta-llama/llama-4-scout-17b-16e-instruct")
 
 # -----------------------------
 # 3) Router
@@ -315,7 +328,7 @@ def fanout(state: State):
                 "evidence": [e.model_dump() for e in state.get("evidence", [])],
             },
         )
-        for task in state["plan"].tasks
+        for task in state["plan"].tasks #here  plan and been created in orchestrator node and stored in state, so we can access it here and fanout one worker per task
     ]
 
 # -----------------------------

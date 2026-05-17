@@ -6,6 +6,7 @@ langchain==1.2.15
 langchain-community==0.4.1
 langchain-core==1.2.31
 langchain-openai==1.1.14
+langchain-groq>=0.2
 langchain-text-splitters==1.1.2
 langgraph==1.1.6
 langgraph-checkpoint==4.0.2
@@ -30,3 +31,13 @@ pydantic-settings==2.13.1
 
 # Utilities
 python-dotenv==1.2.2
+
+# Database (Neon PostgreSQL)
+psycopg2-binary>=2.9
+
+# HTTP (GitHub API)
+requests>=2.31
+
+# Backend API
+fastapi>=0.115
+uvicorn[standard]>=0.34

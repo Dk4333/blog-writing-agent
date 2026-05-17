@@ -40,3 +40,7 @@ outputs/
 images/
 *.md
 !README.md
+
+# Node / React frontend
+node_modules/
+frontend/dist/

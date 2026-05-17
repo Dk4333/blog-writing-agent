@@ -1,0 +1,28 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Secrets & env
+.env
+.env.local
+.streamlit/secrets.toml
+
+# Outputs
+outputs/
+images/
+
+# Dev tools
+.git/
+.idea/
+.vscode/
+notebooks/
+tests/
+
+# Node (frontend has its own .dockerignore via context)
+frontend/node_modules/
+frontend/dist/
