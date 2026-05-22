@@ -40,7 +40,6 @@ services:
           name: blog-agent-backend
           type: web
           property: host
-          envVarKey: RENDER_BACKEND_URL
     routes:
       - type: rewrite
         source: /api/*
