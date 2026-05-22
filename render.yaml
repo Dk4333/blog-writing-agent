@@ -24,7 +24,7 @@ services:
       - key: GOOGLE_API_KEY
         sync: false
       - key: CORS_ORIGINS
-        value: https://blog-agent-frontend.onrender.com
+        value: https://blog-agent-frontend-64v3.onrender.com
     healthCheckPath: /api/health
 
   # React frontend (static sites are always free on Render)
@@ -34,16 +34,10 @@ services:
     rootDir: frontend
     buildCommand: npm install && npm run build
     staticPublishPath: dist
-    envVars:
-      - key: VITE_API_URL
-        fromService:
-          name: blog-agent-backend
-          type: web
-          property: host
     routes:
       - type: rewrite
         source: /api/*
-        destination: https://blog-agent-backend.onrender.com/api/*
+        destination: https://blog-agent-backend-sj89.onrender.com/api/*
     headers:
       - path: /*
         name: X-Frame-Options
