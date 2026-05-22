@@ -42,7 +42,7 @@ class Task(BaseModel): # this is the schema for each section of the blog, which 
     id: int
     title: str
     goal: str = Field(..., description="One sentence describing what the reader should do/understand.")
-    bullets: List[str] = Field(..., min_length=3, max_length=6)
+    bullets: List[str] = Field(default_factory=list)
     target_words: int = Field(..., description="Target words (120–550).")
 
     tags: List[str] = Field(default_factory=list)
@@ -50,14 +50,36 @@ class Task(BaseModel): # this is the schema for each section of the blog, which 
     requires_citations: bool = False
     requires_code: bool = False
 
+    @field_validator("bullets", mode="after")
+    @classmethod
+    def _ensure_min_bullets(cls, v: List[str]) -> List[str]:
+        """Pad bullets to minimum 3 if the LLM under-produces."""
+        while len(v) < 3:
+            v.append("Additional details to be expanded during writing.")
+        return v[:6]  # cap at 6
+
 
 class Plan(BaseModel): # this is the output of orchestrator node, which contains the overall plan for the blog post, including the list of tasks (sections) to be written by workers; stored in state and accessed by worker and reducer
     blog_title: str
     audience: str
     tone: str
-    blog_kind: Literal["explainer", "tutorial", "news_roundup", "comparison", "system_design"] = "explainer"
+    blog_kind: str = Field("explainer", description="One of: explainer, tutorial, news_roundup, comparison, system_design")
     constraints: List[str] = Field(default_factory=list)
     tasks: List[Task]
+
+    @field_validator("blog_kind", mode="before")
+    @classmethod
+    def _coerce_blog_kind(cls, v: object) -> str:
+        """Accept any value from the LLM and map to closest valid kind."""
+        allowed = {"explainer", "tutorial", "news_roundup", "comparison", "system_design"}
+        if isinstance(v, str):
+            v_lower = v.lower().replace("-", "_").replace(" ", "_")
+            if v_lower in allowed:
+                return v_lower
+            # Common LLM hallucinations → sensible defaults
+            mapping = {"hybrid": "explainer", "opinion": "explainer", "guide": "tutorial", "roundup": "news_roundup", "news": "news_roundup"}
+            return mapping.get(v_lower, "explainer")
+        return "explainer"
 
 
 class EvidenceItem(BaseModel):
@@ -79,13 +101,36 @@ class RouterDecision(BaseModel):
     @classmethod
     def _coerce_bool(cls, v: object) -> bool:
         if isinstance(v, str):
-            return v.strip().lower() == "true"
-        return v
+            return v.lower() == "true"
+        return bool(v)
 
     @field_validator("max_results_per_query", mode="before")
     @classmethod
     def _coerce_int(cls, v: object) -> int:
-        return int(v)
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return 5
+
+    @classmethod
+    def model_json_schema(cls, **kwargs):  # type: ignore[override]
+        """Override schema to accept strings for bool/int fields.
+
+        Claude validates tool-call parameters against the schema *before*
+        Pydantic validators run, so we must advertise that strings are valid
+        for these fields; validators then coerce them to the correct types.
+        """
+        schema = super().model_json_schema(**kwargs)
+        schema["properties"]["needs_research"] = {
+            "title": "Needs Research",
+            "anyOf": [{"type": "boolean"}, {"type": "string"}],
+        }
+        schema["properties"]["max_results_per_query"] = {
+            "title": "Max Results Per Query",
+            "default": 5,
+            "anyOf": [{"type": "integer"}, {"type": "string"}],
+        }
+        return schema
 
 
 class EvidencePack(BaseModel):
@@ -284,30 +329,41 @@ Output must match Plan schema.
 """
 
 def orchestrator_node(state: State) -> dict:
+    import logging
+    logger = logging.getLogger(__name__)
+
     planner = llm.with_structured_output(Plan)
     mode = state.get("mode", "closed_book")
     evidence = state.get("evidence", [])
 
     forced_kind = "news_roundup" if mode == "open_book" else None
 
-    plan = planner.invoke(
-        [
-            SystemMessage(content=ORCH_SYSTEM),
-            HumanMessage(
-                content=(
-                    f"Topic: {state['topic']}\n"
-                    f"Mode: {mode}\n"
-                    f"As-of: {state['as_of']} (recency_days={state['recency_days']})\n"
-                    f"{'Force blog_kind=news_roundup' if forced_kind else ''}\n\n"
-                    f"Evidence:\n{[e.model_dump() for e in evidence][:16]}"
-                )
-            ),
-        ]
-    )
-    if forced_kind:
-        plan.blog_kind = "news_roundup"
+    messages = [
+        SystemMessage(content=ORCH_SYSTEM),
+        HumanMessage(
+            content=(
+                f"Topic: {state['topic']}\n"
+                f"Mode: {mode}\n"
+                f"As-of: {state['as_of']} (recency_days={state['recency_days']})\n"
+                f"{'Force blog_kind=news_roundup' if forced_kind else ''}\n\n"
+                f"Evidence:\n{[e.model_dump() for e in evidence][:16]}"
+            )
+        ),
+    ]
 
-    return {"plan": plan}
+    # Retry up to 3 times on structured output failures
+    last_err = None
+    for attempt in range(3):
+        try:
+            plan = planner.invoke(messages)
+            if forced_kind:
+                plan.blog_kind = "news_roundup"
+            return {"plan": plan}
+        except Exception as e:
+            last_err = e
+            logger.warning("orchestrator_node attempt %d failed: %s", attempt + 1, e)
+
+    raise RuntimeError(f"orchestrator_node failed after 3 attempts: {last_err}")
 
 
 # -----------------------------
@@ -423,28 +479,42 @@ Return strictly GlobalImagePlan.
 """
 
 def decide_images(state: State) -> dict:
+    import logging
+    logger = logging.getLogger(__name__)
+
     planner = llm.with_structured_output(GlobalImagePlan)
     merged_md = state["merged_md"]
     plan = state["plan"]
     assert plan is not None
 
-    image_plan = planner.invoke(
-        [
-            SystemMessage(content=DECIDE_IMAGES_SYSTEM),
-            HumanMessage(
-                content=(
-                    f"Blog kind: {plan.blog_kind}\n"
-                    f"Topic: {state['topic']}\n\n"
-                    "Insert placeholders + propose image prompts.\n\n"
-                    f"{merged_md}"
-                )
-            ),
-        ]
-    )
+    # Retry up to 2 times; on failure, skip images gracefully
+    for attempt in range(2):
+        try:
+            image_plan = planner.invoke(
+                [
+                    SystemMessage(content=DECIDE_IMAGES_SYSTEM),
+                    HumanMessage(
+                        content=(
+                            f"Blog kind: {plan.blog_kind}\n"
+                            f"Topic: {state['topic']}\n\n"
+                            "Insert placeholders + propose image prompts.\n\n"
+                            f"{merged_md}"
+                        )
+                    ),
+                ]
+            )
+            return {
+                "md_with_placeholders": image_plan.md_with_placeholders,
+                "image_specs": [img.model_dump() for img in image_plan.images],
+            }
+        except Exception as e:
+            logger.warning("decide_images attempt %d failed: %s", attempt + 1, e)
 
+    # Fallback: no images, use merged markdown as-is
+    logger.warning("decide_images failed after retries, skipping images.")
     return {
-        "md_with_placeholders": image_plan.md_with_placeholders,
-        "image_specs": [img.model_dump() for img in image_plan.images],
+        "md_with_placeholders": merged_md,
+        "image_specs": [],
     }
 
 

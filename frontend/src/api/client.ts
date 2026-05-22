@@ -1,6 +1,8 @@
 /* API client — all HTTP calls to FastAPI backend */
 
-const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
+// When served from nginx (Docker), use relative paths so nginx proxies /api/.
+// For local dev (Vite), set VITE_API_URL=http://localhost:8088.
+const API_BASE = import.meta.env.VITE_API_URL || "";
 
 /* ---------- types ---------- */
 export interface RunSummary {

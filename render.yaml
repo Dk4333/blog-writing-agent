@@ -1,0 +1,48 @@
+services:
+  # FastAPI backend
+  - type: web
+    name: blog-agent-backend
+    runtime: docker
+    rootDir: backend
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: GITHUB_REPO
+        sync: false
+      - key: GITHUB_BRANCH
+        value: main
+      - key: GOOGLE_API_KEY
+        sync: false
+    healthCheckPath: /api/health
+
+  # React frontend
+  - type: web
+    name: blog-agent-frontend
+    runtime: static
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    envVars:
+      - key: VITE_API_URL
+        fromService:
+          name: blog-agent-backend
+          type: web
+          property: hostport
+          # This resolves to https://blog-agent-backend.onrender.com
+    routes:
+      - type: rewrite
+        source: /api/*
+        destination: https://blog-agent-backend.onrender.com/api/*
+    headers:
+      - path: /*
+        name: X-Frame-Options
+        value: SAMEORIGIN

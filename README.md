@@ -1,17 +1,17 @@
 # Blog Writing Agent
 
-An AI-powered blog writing agent built with **LangGraph**, **LangChain**, and **Groq (Llama 4 Scout)**, featuring live web research via **Tavily**, human-in-the-loop review, GitHub publishing, and Neon PostgreSQL persistence.
+An AI-powered blog writing agent built with **LangGraph**, **LangChain**, and **OpenAI**, featuring live web research via **Tavily**, human-in-the-loop review, GitHub publishing, and Neon PostgreSQL persistence.
 
 ## Architecture
 
 ```
 React Frontend (Vite + TypeScript)
-        │  HTTP /api/*
+        │  HTTP /api/*  (nginx reverse proxy)
         ▼
 FastAPI Backend  ──►  LangGraph Pipeline
         │                    │
         │              Router → Research (Tavily)
-        │              → Orchestrator
+        │              → Orchestrator (with retry)
         │              → Parallel Workers (fan-out via Send)
         │              → Reducer (merge → images)
         ▼
@@ -28,40 +28,44 @@ Neon PostgreSQL          GitHub Contents API
 - **LLM-based rewriter** — revise blog with natural language feedback
 - **GitHub publishing** — push approved posts directly to a GitHub repo via Contents API
 - **Neon PostgreSQL persistence** — all runs stored with full history
-- **Dual frontend** — React (primary) + Streamlit (legacy, still works)
+- **AI image generation** — automatic image planning with graceful fallback on failure
+- **Retry-resilient LLM calls** — structured output calls retry on validation failures
+- **Frontend** — React + TypeScript + Vite, served via nginx in production
 - **Docker** — single `docker compose up --build` starts everything
 
 ## Project Structure
 
 ```
 blog-writing-agent/
-├── src/
-│   └── blog_agent/
-│       ├── agent.py              # LangGraph pipeline
-│       ├── database.py           # Neon PostgreSQL persistence
-│       ├── github_publisher.py   # GitHub Contents API integration
-│       ├── rewriter.py           # LLM-based blog rewriter
-│       ├── api/
-│       │   ├── main.py           # FastAPI app (7 endpoints)
-│       │   └── schemas.py        # Pydantic request/response models
-│       └── frontend/
-│           └── app.py            # Streamlit UI (legacy)
-├── frontend/                     # React + TypeScript + Vite
+├── backend/
 │   ├── src/
-│   │   ├── api/client.ts         # Fetch calls to FastAPI
-│   │   ├── pages/Generate.tsx    # Blog generation + HITL
-│   │   ├── pages/History.tsx     # Past runs
-│   │   └── components/           # Navbar, StatusBadge
-│   ├── Dockerfile                # Multi-stage: Node build → Nginx
-│   └── nginx.conf                # SPA routing + /api/ proxy
-├── Dockerfile.backend            # Python 3.11-slim + uvicorn
-├── docker-compose.yml            # Wires backend + frontend
-├── notebooks/                    # Exploratory Jupyter notebooks
-├── outputs/                      # Generated blog posts & images
-├── .env                          # API keys (never commit)
-├── .env.example                  # Environment variable template
-├── pyproject.toml
-└── requirements.txt
+│   │   └── blog_agent/
+│   │       ├── agent.py              # LangGraph pipeline (router, orchestrator, workers, reducer)
+│   │       ├── database.py           # Neon PostgreSQL persistence
+│   │       ├── github_publisher.py   # GitHub Contents API integration
+│   │       ├── rewriter.py           # LLM-based blog rewriter
+│   │       └── api/
+│   │           ├── main.py           # FastAPI app (7 endpoints)
+│   │           └── schemas.py        # Pydantic request/response models
+│   ├── notebooks/                    # Exploratory Jupyter notebooks
+│   ├── outputs/                      # Generated blog posts & images
+│   ├── tests/                        # Backend tests
+│   ├── Dockerfile                    # Python 3.11-slim + uvicorn
+│   ├── pyproject.toml                # Backend Python package config
+│   └── requirements.txt              # Pinned dependencies
+├── frontend/                         # React + TypeScript + Vite
+│   ├── src/
+│   │   ├── api/client.ts             # Fetch calls to FastAPI (relative paths)
+│   │   ├── pages/Generate.tsx        # Blog generation + HITL
+│   │   ├── pages/History.tsx         # Past runs
+│   │   └── components/               # Navbar, StatusBadge
+│   ├── Dockerfile                    # Multi-stage: Node build → Nginx
+│   └── nginx.conf                    # SPA routing + /api/ proxy → backend:8000
+├── docker-compose.yml                # Wires backend + frontend
+├── .env                              # API keys (never commit)
+├── .env.example                      # Environment variable template
+├── pyproject.toml                    # Root project config
+└── requirements.txt                  # Root requirements (if needed)
 ```
 
 ## Quick Start
@@ -85,19 +89,20 @@ git clone <repo-url>
 cd blog-writing-agent
 python -m venv .venv
 source .venv/bin/activate
-pip install -e .
+pip install -e ./backend
 
 cp .env.example .env   # fill in your API keys
 
 # Terminal 1 — FastAPI backend
-uvicorn blog_agent.api.main:app --reload --port 8000
+cd backend
+PYTHONPATH=src uvicorn blog_agent.api.main:app --reload --port 8000
 
-# Terminal 2 — React frontend
-cd frontend && npm install && npm run dev
+# Terminal 2 — React frontend (set VITE_API_URL for local dev)
+cd frontend
+npm install
+VITE_API_URL=http://localhost:8000 npm run dev
 # → http://localhost:5173
-
-# Or run the legacy Streamlit UI
-streamlit run src/blog_agent/frontend/app.py
+```
 ```
 
 ## API Endpoints
@@ -116,13 +121,14 @@ streamlit run src/blog_agent/frontend/app.py
 
 | Variable | Description |
 |----------|-------------|
-| `GROQ_API_KEY` | Groq API key (LLM provider) |
+| `OPENAI_API_KEY` | OpenAI API key (primary LLM + image generation) |
+| `GROQ_API_KEY` | Groq API key (optional, fast inference) |
 | `TAVILY_API_KEY` | Tavily search API key |
 | `DATABASE_URL` | Neon PostgreSQL connection string |
 | `GITHUB_TOKEN` | GitHub personal access token |
 | `GITHUB_REPO` | Target repo for publishing (`owner/repo`) |
 | `GITHUB_BRANCH` | Branch to push to (default: `main`) |
-| `OPENAI_API_KEY` | OpenAI key (optional, unused by default) |
+| `GOOGLE_API_KEY` | Google API key (optional) |
 
 ## Notebooks
 
