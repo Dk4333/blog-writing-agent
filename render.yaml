@@ -34,10 +34,14 @@ services:
     rootDir: frontend
     buildCommand: npm install && npm run build
     staticPublishPath: dist
+    envVars:
+      - key: VITE_API_URL
+        value: https://blog-agent-backend-sj89.onrender.com
     routes:
+      # Support client-side routing (SPA fallback)
       - type: rewrite
-        source: /api/*
-        destination: https://blog-agent-backend-sj89.onrender.com/api/*
+        source: /*
+        destination: /index.html
     headers:
       - path: /*
         name: X-Frame-Options
