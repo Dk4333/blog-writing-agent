@@ -53,14 +53,44 @@ export async function healthCheck() {
   return json_or_throw(res);
 }
 
+export interface ReferenceFile {
+  name: string;
+  size: number;
+  uploaded_at: string;
+}
+
 export async function generateBlog(
   topic: string,
-  as_of?: string
+  as_of?: string,
+  use_rag?: boolean
 ): Promise<GenerateResponse> {
   const res = await fetch(`${API_BASE}/api/generate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ topic, as_of: as_of || undefined }),
+    body: JSON.stringify({ topic, as_of: as_of || undefined, use_rag }),
+  });
+  return json_or_throw(res);
+}
+
+export async function uploadReferenceFile(file: File): Promise<{ message: string }> {
+  const formData = new FormData();
+  formData.append("file", file);
+
+  const res = await fetch(`${API_BASE}/api/rag/upload`, {
+    method: "POST",
+    body: formData,
+  });
+  return json_or_throw(res);
+}
+
+export async function listReferenceFiles(): Promise<ReferenceFile[]> {
+  const res = await fetch(`${API_BASE}/api/rag/files`);
+  return json_or_throw(res);
+}
+
+export async function deleteReferenceFile(filename: string): Promise<{ message: string }> {
+  const res = await fetch(`${API_BASE}/api/rag/files/${encodeURIComponent(filename)}`, {
+    method: "DELETE",
   });
   return json_or_throw(res);
 }

@@ -1,5 +1,5 @@
 /* Generate page — enter topic, generate blog, review/approve/publish */
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import ReactMarkdown from "react-markdown";
 import StatusBadge from "../components/StatusBadge";
 import {
@@ -7,7 +7,11 @@ import {
   updateRun,
   rewriteRun,
   publishRun,
+  uploadReferenceFile,
+  listReferenceFiles,
+  deleteReferenceFile,
   type GenerateResponse,
+  type ReferenceFile,
 } from "../api/client";
 
 export default function Generate() {
@@ -18,6 +22,53 @@ export default function Generate() {
   const [result, setResult] = useState<GenerateResponse | null>(null);
   const [status, setStatus] = useState("draft");
   const [tab, setTab] = useState<"preview" | "plan" | "evidence">("preview");
+
+  // RAG state
+  const [useRag, setUseRag] = useState(false);
+  const [ragFiles, setRagFiles] = useState<ReferenceFile[]>([]);
+  const [uploadingRag, setUploadingRag] = useState(false);
+
+  useEffect(() => {
+    fetchFiles();
+  }, []);
+
+  async function fetchFiles() {
+    try {
+      const files = await listReferenceFiles();
+      setRagFiles(files);
+    } catch (e: unknown) {
+      console.error("Failed to load reference files", e);
+    }
+  }
+
+  async function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploadingRag(true);
+    setError("");
+    try {
+      await uploadReferenceFile(file);
+      await fetchFiles();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setUploadingRag(false);
+    }
+  }
+
+  async function handleFileDelete(filename: string) {
+    setError("");
+    try {
+      await deleteReferenceFile(filename);
+      await fetchFiles();
+      // Disable checkbox if no files left
+      if (ragFiles.length <= 1) {
+        setUseRag(false);
+      }
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
 
   // Edit state
   const [editing, setEditing] = useState(false);
@@ -40,7 +91,7 @@ export default function Generate() {
     setStatus("draft");
     setPublishUrl("");
     try {
-      const res = await generateBlog(topic.trim(), asOf);
+      const res = await generateBlog(topic.trim(), asOf, useRag);
       setResult(res);
       setStatus("draft");
     } catch (e: unknown) {
@@ -114,6 +165,72 @@ export default function Generate() {
           rows={4}
           style={styles.textarea}
         />
+
+        {/* RAG Reference File Manager */}
+        <div style={styles.ragSection}>
+          <div style={styles.ragHeader}>
+            <span style={styles.ragTitle}>📚 Local Reference Documents (RAG)</span>
+            {uploadingRag && <span style={styles.spinner}>⏳ Ingesting...</span>}
+          </div>
+          
+          {ragFiles.length > 0 ? (
+            <div style={styles.fileGrid}>
+              {ragFiles.map((file) => (
+                <div key={file.name} style={styles.fileCard}>
+                  <div style={styles.fileInfo}>
+                    <span style={styles.fileIcon}>📄</span>
+                    <div style={styles.fileMeta}>
+                      <span style={styles.fileName}>{file.name}</span>
+                      <span style={styles.fileSize}>{(file.size / 1024).toFixed(1)} KB</span>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => handleFileDelete(file.name)}
+                    style={styles.deleteBtn}
+                    title="Delete file & purge index"
+                  >
+                    🗑️
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div style={styles.emptyRag}>
+              No active documents. Upload technical drafts, notes, or APIs below to write grounded blogs!
+            </div>
+          )}
+
+          <div style={styles.uploadArea}>
+            <label style={styles.uploadLabel}>
+              📤 Click to upload reference (.md, .txt, .html)
+              <input
+                type="file"
+                accept=".md,.txt,.html,.htm"
+                onChange={handleFileUpload}
+                style={{ display: "none" }}
+              />
+            </label>
+          </div>
+
+          <div style={styles.toggleContainer}>
+            <label style={styles.toggleLabel}>
+              <input
+                type="checkbox"
+                checked={useRag}
+                onChange={(e) => setUseRag(e.target.checked)}
+                disabled={ragFiles.length === 0}
+                style={styles.checkbox}
+              />
+              <span style={{ fontWeight: 600, color: ragFiles.length === 0 ? "#9ca3af" : "#1f2937" }}>
+                Ground blog post using these reference documents
+              </span>
+            </label>
+            {ragFiles.length === 0 && (
+              <span style={styles.checkboxHelper}>(Upload at least one document to enable RAG)</span>
+            )}
+          </div>
+        </div>
+
         <div style={styles.row}>
           <label style={styles.label}>
             As-of date:
@@ -445,5 +562,134 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#333",
     textDecoration: "none",
     fontSize: 14,
+  },
+  ragSection: {
+    marginTop: 16,
+    padding: 16,
+    borderRadius: 8,
+    border: "1px dashed #cbd5e1",
+    backgroundColor: "#ffffff",
+    boxSizing: "border-box",
+  },
+  ragHeader: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 12,
+  },
+  ragTitle: {
+    fontSize: 14,
+    fontWeight: 600,
+    color: "#475569",
+  },
+  fileGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))",
+    gap: 10,
+    marginBottom: 12,
+  },
+  fileCard: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    padding: 10,
+    borderRadius: 6,
+    border: "1px solid #e2e8f0",
+    backgroundColor: "#f8fafc",
+    overflow: "hidden",
+  },
+  fileInfo: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    overflow: "hidden",
+    flex: 1,
+  },
+  fileIcon: {
+    fontSize: 18,
+  },
+  fileMeta: {
+    display: "flex",
+    flexDirection: "column",
+    overflow: "hidden",
+    flex: 1,
+  },
+  fileName: {
+    fontSize: 13,
+    fontWeight: 500,
+    color: "#334155",
+    whiteSpace: "nowrap",
+    textOverflow: "ellipsis",
+    overflow: "hidden",
+  },
+  fileSize: {
+    fontSize: 11,
+    color: "#64748b",
+  },
+  deleteBtn: {
+    background: "none",
+    border: "none",
+    cursor: "pointer",
+    fontSize: 14,
+    padding: 4,
+    borderRadius: 4,
+    marginLeft: 6,
+  },
+  emptyRag: {
+    fontSize: 13,
+    color: "#64748b",
+    textAlign: "center",
+    padding: "16px 8px",
+    backgroundColor: "#f8fafc",
+    borderRadius: 6,
+    marginBottom: 12,
+  },
+  uploadArea: {
+    display: "flex",
+    justifyContent: "center",
+    alignItems: "center",
+    padding: "8px 12px",
+    border: "1px dashed #cbd5e1",
+    borderRadius: 6,
+    backgroundColor: "#f8fafc",
+    cursor: "pointer",
+    marginBottom: 12,
+  },
+  uploadLabel: {
+    fontSize: 13,
+    color: "#2563eb",
+    fontWeight: 500,
+    cursor: "pointer",
+    width: "100%",
+    textAlign: "center",
+  },
+  toggleContainer: {
+    display: "flex",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: 8,
+    paddingTop: 8,
+    borderTop: "1px solid #f1f5f9",
+  },
+  toggleLabel: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    fontSize: 13,
+    cursor: "pointer",
+  },
+  checkbox: {
+    width: 16,
+    height: 16,
+    cursor: "pointer",
+  },
+  checkboxHelper: {
+    fontSize: 11,
+    color: "#64748b",
+  },
+  spinner: {
+    fontSize: 12,
+    color: "#2563eb",
+    fontWeight: 500,
   },
 };

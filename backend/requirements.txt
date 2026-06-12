@@ -18,6 +18,7 @@ openai==2.32.0
 
 # Search / Research
 tavily-python==0.7.23
+chromadb==0.5.23
 
 # Frontend
 streamlit==1.56.0
@@ -41,3 +42,4 @@ requests>=2.31
 # Backend API
 fastapi>=0.115
 uvicorn[standard]>=0.34
+python-multipart>=0.0.18

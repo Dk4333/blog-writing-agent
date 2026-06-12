@@ -18,6 +18,8 @@ openai==2.32.0
 
 # Search / Research
 tavily-python==0.7.23
+chromadb==0.5.23
+python-multipart>=0.0.18
 
 # Frontend
 streamlit==1.56.0

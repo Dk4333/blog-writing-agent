@@ -277,7 +277,7 @@ def research_node(state: State) -> dict:
         raw.extend(_tavily_search(q, max_results=6))
 
     if not raw:
-        return {"evidence": []}
+        return {"evidence": state.get("evidence") or []}
 
     extractor = llm.with_structured_output(EvidencePack)
     pack = extractor.invoke(
@@ -294,6 +294,11 @@ def research_node(state: State) -> dict:
     )
 
     dedup = {}
+    # Populate deduplicator with pre-existing evidence first (e.g., local RAG chunks)
+    for e in state.get("evidence") or []:
+        if e.url:
+            dedup[e.url] = e
+
     for e in pack.evidence:
         if e.url:
             dedup[e.url] = e

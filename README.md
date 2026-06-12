@@ -1,6 +1,6 @@
 # Blog Writing Agent
 
-An AI-powered blog writing agent built with **LangGraph**, **LangChain**, and **OpenAI**, featuring live web research via **Tavily**, human-in-the-loop review, GitHub publishing, and Neon PostgreSQL persistence.
+An AI-powered blog writing agent built with **LangGraph**, **LangChain**, and **OpenAI**, featuring local **RAG grounding** (via Chroma), live web research via **Tavily**, human-in-the-loop review, GitHub publishing, and Neon PostgreSQL persistence.
 
 ## Architecture
 
@@ -10,7 +10,7 @@ React Frontend (Vite + TypeScript)
         ▼
 FastAPI Backend  ──►  LangGraph Pipeline
         │                    │
-        │              Router → Research (Tavily)
+        │              Router → Research (Tavily + Local RAG)
         │              → Orchestrator (with retry)
         │              → Parallel Workers (fan-out via Send)
         │              → Reducer (merge → images)
@@ -23,6 +23,7 @@ Neon PostgreSQL          GitHub Contents API
 
 - **Multi-agent pipeline** — Router → Orchestrator → Parallel Section Writers → Reducer, orchestrated with LangGraph
 - **Fan-out / fan-in** — workers run in parallel via LangGraph `Send()` API
+- **Local RAG Grounding** — upload local reference drafts, notes, or APIs via React UI to ground new posts in private or complex domain knowledge
 - **Live web research** — optional Tavily search with citations
 - **Human-in-the-loop (HITL)** — review, approve, or request rewrites before publishing
 - **LLM-based rewriter** — revise blog with natural language feedback
@@ -32,6 +33,7 @@ Neon PostgreSQL          GitHub Contents API
 - **Retry-resilient LLM calls** — structured output calls retry on validation failures
 - **Frontend** — React + TypeScript + Vite, served via nginx in production
 - **Docker** — single `docker compose up --build` starts everything
+- **Chroma Vector DB** — fully local vector storage and semantic lookup for uploaded documents
 
 ## Project Structure
 
@@ -44,9 +46,13 @@ blog-writing-agent/
 │   │       ├── database.py           # Neon PostgreSQL persistence
 │   │       ├── github_publisher.py   # GitHub Contents API integration
 │   │       ├── rewriter.py           # LLM-based blog rewriter
+│   │       ├── rag.py                # Local reference document RAG indexing & querying
 │   │       └── api/
-│   │           ├── main.py           # FastAPI app (7 endpoints)
+│   │           ├── main.py           # FastAPI app (10 endpoints)
 │   │           └── schemas.py        # Pydantic request/response models
+│   ├── storage/                      # Local database and document storage
+│   │   ├── chroma_db/                # Chroma SQLite collection files
+│   │   └── reference/                # Copied user reference text/markdown documents
 │   ├── notebooks/                    # Exploratory Jupyter notebooks
 │   ├── outputs/                      # Generated blog posts & images
 │   ├── tests/                        # Backend tests
@@ -110,12 +116,15 @@ VITE_API_URL=http://localhost:8000 npm run dev
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/api/health` | Health check |
-| `POST` | `/api/generate` | Run the blog agent |
+| `POST` | `/api/generate` | Run the blog agent (supports optional local RAG) |
 | `GET` | `/api/runs` | List all past runs |
 | `GET` | `/api/runs/{id}` | Get a single run |
 | `PATCH` | `/api/runs/{id}` | Update run fields |
 | `POST` | `/api/runs/{id}/rewrite` | Rewrite with feedback |
 | `POST` | `/api/runs/{id}/publish` | Publish to GitHub |
+| `GET` | `/api/rag/files` | List all uploaded reference documents |
+| `POST` | `/api/rag/upload` | Upload and index a reference document (supports .md, .txt, .html) |
+| `DELETE` | `/api/rag/files/{filename}` | Delete reference document from storage and purge database vectors |
 
 ## Environment Variables
 

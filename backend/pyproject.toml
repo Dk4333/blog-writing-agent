@@ -21,6 +21,8 @@ dependencies = [
     "requests>=2.31",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.34",
+    "chromadb>=0.4.0,<0.6.0",
+    "python-multipart>=0.0.18",
 ]
 
 [project.scripts]

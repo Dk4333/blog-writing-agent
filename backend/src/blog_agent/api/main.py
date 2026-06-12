@@ -6,10 +6,10 @@ import re
 from datetime import date
 from typing import List
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 
-from blog_agent.agent import app as langgraph_app
+from blog_agent.agent import app as langgraph_app, EvidenceItem
 from blog_agent.database import (
     db_available,
     init_db,
@@ -20,6 +20,7 @@ from blog_agent.database import (
 )
 from blog_agent.github_publisher import github_available, publish_to_github
 from blog_agent.rewriter import rewrite_with_feedback
+from blog_agent import rag
 
 from .schemas import (
     GenerateRequest,
@@ -76,17 +77,94 @@ def health():
     return {"status": "ok", "db": db_available(), "github": github_available()}
 
 
+@app.get("/api/rag/files")
+def list_reference_files():
+    """List all currently uploaded reference documents."""
+    import datetime
+    files = []
+    try:
+        for f in rag.REFERENCE_DIR.iterdir():
+            if f.is_file() and not f.name.startswith("."):
+                stat = f.stat()
+                files.append({
+                    "name": f.name,
+                    "size": stat.st_size,
+                    "uploaded_at": datetime.datetime.fromtimestamp(stat.st_mtime).isoformat()
+                })
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return files
+
+
+@app.post("/api/rag/upload")
+async def upload_reference_file(file: UploadFile = File(...)):
+    """Upload a reference document and index it in Chroma instantly."""
+    filename = os.path.basename(file.filename) if file.filename else ""
+    if not filename or filename.startswith("."):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    allowed_extensions = {".txt", ".md", ".html", ".htm"}
+    file_ext = os.path.splitext(filename)[1].lower()
+    if file_ext not in allowed_extensions:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported file format. Only .txt, .md, and .html files are supported."
+        )
+
+    dest_path = rag.REFERENCE_DIR / filename
+    try:
+        content = await file.read()
+        dest_path.write_bytes(content)
+        rag.ingest_file(dest_path)
+    except Exception as e:
+        if dest_path.exists():
+            try:
+                dest_path.unlink()
+            except Exception:
+                pass
+        raise HTTPException(status_code=500, detail=f"Failed to ingest file: {str(e)}")
+
+    return {"message": f"Successfully uploaded and indexed {filename}"}
+
+
+@app.delete("/api/rag/files/{filename}")
+def delete_reference_file(filename: str):
+    """Delete a reference document from storage and purge its vectors."""
+    filename = os.path.basename(filename)
+    file_path = rag.REFERENCE_DIR / filename
+
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    try:
+        file_path.unlink()
+        rag.delete_file_from_index(filename)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete file: {str(e)}")
+
+    return {"message": f"Successfully deleted {filename} from storage and index"}
+
+
 @app.post("/api/generate", response_model=GenerateResponse)
 def generate_blog(req: GenerateRequest):
     """Run the full LangGraph pipeline and return the blog."""
     as_of = req.as_of or date.today().isoformat()
+
+    local_evidence = []
+    if req.use_rag:
+        try:
+            chunks = rag.retrieve_local_context(req.topic.strip())
+            local_evidence = [EvidenceItem(**c) for c in chunks]
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning("Failed to retrieve RAG context: %s", exc)
 
     inputs = {
         "topic": req.topic.strip(),
         "mode": "",
         "needs_research": False,
         "queries": [],
-        "evidence": [],
+        "evidence": local_evidence,
         "plan": None,
         "as_of": as_of,
         "recency_days": 7,

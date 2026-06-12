@@ -10,6 +10,7 @@ from pydantic import BaseModel
 class GenerateRequest(BaseModel):
     topic: str
     as_of: Optional[str] = None  # ISO date, defaults to today
+    use_rag: bool = False
 
 
 class RewriteRequest(BaseModel):
