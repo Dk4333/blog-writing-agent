@@ -3,13 +3,15 @@ from __future__ import annotations
 
 import os
 import re
+import uuid
 from datetime import date
 from typing import List
 
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 
-from blog_agent.agent import app as langgraph_app, EvidenceItem
+from blog_agent.agent import graph_builder, get_checkpointer, EvidenceItem
+from langgraph.types import Command
 from blog_agent.database import (
     db_available,
     init_db,
@@ -28,6 +30,8 @@ from .schemas import (
     RewriteRequest,
     PublishRequest,
     PublishResponse,
+    ApproveRequest,
+    ApproveResponse,
     UpdateRunRequest,
     RunSummary,
     RunDetail,
@@ -51,14 +55,23 @@ app.add_middleware(
 )
 
 
+# Module-level placeholder — compiled with checkpointer at startup
+langgraph_app = None
+
+
 @app.on_event("startup")
 def _startup():
+    global langgraph_app
     if db_available():
         try:
             init_db()
         except Exception as e:
             import logging
             logging.getLogger(__name__).warning("DB init failed (running without persistence): %s", e)
+
+    # Compile the LangGraph with a PostgresSaver checkpointer
+    checkpointer = get_checkpointer()
+    langgraph_app = graph_builder.compile(checkpointer=checkpointer)
 
 
 # ---------- Helpers ----------
@@ -147,8 +160,14 @@ def delete_reference_file(filename: str):
 
 @app.post("/api/generate", response_model=GenerateResponse)
 def generate_blog(req: GenerateRequest):
-    """Run the full LangGraph pipeline and return the blog."""
+    """Run the LangGraph pipeline. Returns the blog at the human_review interrupt.
+
+    The graph pauses at the human_review node. The response includes a
+    ``thread_id`` that must be passed to ``POST /api/runs/{run_id}/approve``
+    to resume the graph with an approval or rejection.
+    """
     as_of = req.as_of or date.today().isoformat()
+    thread_id = str(uuid.uuid4())
 
     local_evidence = []
     if req.use_rag:
@@ -173,10 +192,14 @@ def generate_blog(req: GenerateRequest):
         "md_with_placeholders": "",
         "image_specs": [],
         "final": "",
+        "approved": None,
+        "github_url": None,
     }
 
+    config = {"configurable": {"thread_id": thread_id}}
+
     try:
-        out = langgraph_app.invoke(inputs)
+        out = langgraph_app.invoke(inputs, config=config)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
@@ -208,6 +231,8 @@ def generate_blog(req: GenerateRequest):
                 mode=out.get("mode", ""),
                 blog_kind=blog_kind,
                 final_md=out.get("final", ""),
+                status="awaiting_approval",
+                thread_id=thread_id,
             )
         except Exception:
             pass
@@ -221,6 +246,8 @@ def generate_blog(req: GenerateRequest):
         plan=plan_dict,
         evidence=evidence_dicts,
         image_specs=out.get("image_specs"),
+        status="awaiting_approval",
+        thread_id=thread_id,
     )
 
 
@@ -287,7 +314,54 @@ def rewrite_run(run_id: int, req: RewriteRequest):
     return updated
 
 
-@app.post("/api/runs/{run_id}/publish", response_model=PublishResponse)
+@app.post("/api/runs/{run_id}/approve", response_model=ApproveResponse)
+def approve_run(run_id: int, req: ApproveRequest):
+    """Resume the paused LangGraph with the user's approval decision.
+
+    If ``approved`` is true the publish node pushes to GitHub;
+    otherwise the graph ends cleanly without publishing.
+    """
+    if not db_available():
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+    run = get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    thread_id = run.get("thread_id")
+    if not thread_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Run has no thread_id — cannot resume graph (was it created before the interrupt flow?)",
+        )
+
+    config = {"configurable": {"thread_id": thread_id}}
+
+    try:
+        result = langgraph_app.invoke(
+            Command(resume={"approved": req.approved}),
+            config=config,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to resume graph: {exc}")
+
+    status = "published" if req.approved else "rejected"
+    github_url = result.get("github_url", "") if isinstance(result, dict) else ""
+
+    try:
+        update_run(
+            run_id,
+            status=status,
+            github_pushed=bool(github_url),
+            github_url=github_url,
+        )
+    except Exception:
+        pass
+
+    return ApproveResponse(status=status, github_url=github_url)
+
+
+@app.post("/api/runs/{run_id}/publish", response_model=PublishResponse, deprecated=True)
 def publish_run(run_id: int, req: PublishRequest):
     """Push blog markdown to GitHub."""
     if not github_available():

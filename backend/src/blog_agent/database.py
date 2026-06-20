@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 
 _ALLOWED_UPDATE_FIELDS = frozenset(
-    {"blog_title", "final_md", "status", "github_pushed", "github_url", "mode", "blog_kind"}
+    {"blog_title", "final_md", "status", "github_pushed", "github_url", "mode", "blog_kind", "thread_id"}
 )
 
 
@@ -49,8 +49,13 @@ def init_db():
                     final_md      TEXT,
                     status        TEXT DEFAULT 'draft',
                     github_pushed BOOLEAN DEFAULT false,
-                    github_url    TEXT
+                    github_url    TEXT,
+                    thread_id     TEXT
                 )
+            """)
+            # Add thread_id column if table already exists (idempotent migration)
+            cur.execute("""
+                ALTER TABLE blog_runs ADD COLUMN IF NOT EXISTS thread_id TEXT
             """)
 
 
@@ -61,17 +66,18 @@ def save_run(
     blog_kind: str,
     final_md: str,
     status: str = "draft",
+    thread_id: str = "",
 ) -> int:
     """Insert a new blog run and return its id."""
     with _get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO blog_runs (topic, blog_title, mode, blog_kind, final_md, status)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                INSERT INTO blog_runs (topic, blog_title, mode, blog_kind, final_md, status, thread_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
                 """,
-                (topic, blog_title, mode, blog_kind, final_md, status),
+                (topic, blog_title, mode, blog_kind, final_md, status, thread_id),
             )
             return cur.fetchone()[0]
 

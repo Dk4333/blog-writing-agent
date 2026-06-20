@@ -1,5 +1,5 @@
 """Blog Writing Agent – core package."""
 
-from blog_agent.agent import app  # noqa: F401
+from blog_agent.agent import graph_builder  # noqa: F401
 
-__all__ = ["app"]
+__all__ = ["graph_builder"]

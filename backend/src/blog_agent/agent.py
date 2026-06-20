@@ -10,7 +10,7 @@ from typing import TypedDict, List, Optional, Literal, Annotated
 from pydantic import BaseModel, Field, field_validator
 
 from langgraph.graph import StateGraph, START, END
-from langgraph.types import Send
+from langgraph.types import Send, interrupt
 
 from langchain_groq import ChatGroq
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -176,6 +176,10 @@ class State(TypedDict):
 
     final: str
 
+    # human-in-the-loop review & publish
+    approved: Optional[bool]
+    github_url: Optional[str]
+
 
 # -----------------------------
 # 2) LLM
@@ -223,7 +227,9 @@ def router_node(state: State) -> dict:
     }
 
 def route_next(state: State) -> str:
-    return "research" if state["needs_research"] else "orchestrator"
+    return "research" if state["needs_research"] else "orchestrator"# if from the state needs_research is true
+    # than we need to perform reasearch so it will go to research node( return "reseach")
+    # else it will go to orchestrator node
 
 # -----------------------------
 # 4) Research (Tavily)
@@ -313,7 +319,9 @@ def research_node(state: State) -> dict:
     return {"evidence": evidence}
 
 # -----------------------------
-# 5) Orchestrator (Plan)
+# 5) Orchestrator (Plan)         # in the node we are passing the evidence of the which
+                                # contains internet info nd store in evidence to the 
+                                # prompt of the llm in order to produce the plan according to that
 # -----------------------------
 ORCH_SYSTEM = """You are a senior technical writer and developer advocate.
 Produce a highly actionable outline for a technical blog post.
@@ -389,7 +397,7 @@ def fanout(state: State):
                 "evidence": [e.model_dump() for e in state.get("evidence", [])],
             },
         )
-        for task in state["plan"].tasks #here  plan and been created in orchestrator node and stored in state, so we can access it here and fanout one worker per task
+        for task in state["plan"].tasks #here  plan has been created in orchestrator node and stored in state, so we can access it here and fanout one worker per task
     ]
 
 # -----------------------------
@@ -607,6 +615,65 @@ def generate_and_place_images(state: State) -> dict:
     (out_dir / filename).write_text(md, encoding="utf-8")
     return {"final": md}
 
+# -----------------------------
+# 8b) Human Review (interrupt)
+# -----------------------------
+def human_review_node(state: State) -> dict:
+    """Pause the graph and send the final blog to the user for review."""
+    plan = state.get("plan")
+    blog_title = ""
+    if plan:
+        blog_title = plan.blog_title if hasattr(plan, "blog_title") else plan.get("blog_title", "")
+
+    decision = interrupt({
+        "blog_title": blog_title,
+        "final_md": state.get("final", ""),
+        "message": "Please review and approve this blog post for publishing.",
+    })
+    # `decision` is whatever the user sends via Command(resume=...)
+    approved = decision.get("approved", False) if isinstance(decision, dict) else bool(decision)
+    return {"approved": approved}
+
+
+# -----------------------------
+# 8c) Publish to GitHub
+# -----------------------------
+def publish_node(state: State) -> dict:
+    """Publish to GitHub if approved, skip otherwise."""
+    if not state.get("approved"):
+        return {"github_url": ""}
+
+    from blog_agent.github_publisher import github_available, publish_to_github
+    if not github_available():
+        return {"github_url": ""}
+
+    plan = state.get("plan")
+    blog_title = "blog"
+    if plan:
+        blog_title = plan.blog_title if hasattr(plan, "blog_title") else plan.get("blog_title", "blog")
+
+    repo = os.getenv("GITHUB_REPO", "")
+    branch = os.getenv("GITHUB_BRANCH", "main")
+    file_path = f"posts/{_safe_slug(blog_title)}.md"
+
+    if not repo:
+        return {"github_url": ""}
+
+    try:
+        result = publish_to_github(
+            content=state.get("final", ""),
+            file_path=file_path,
+            repo=repo,
+            commit_message=f"Add blog: {blog_title}",
+            branch=branch,
+        )
+        return {"github_url": result.get("html_url", "")}
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error("publish_node failed: %s", e)
+        return {"github_url": ""}
+
+
 # build reducer subgraph
 reducer_graph = StateGraph(State)
 reducer_graph.add_node("merge_content", merge_content)
@@ -627,6 +694,8 @@ g.add_node("research", research_node)
 g.add_node("orchestrator", orchestrator_node)
 g.add_node("worker", worker_node)
 g.add_node("reducer", reducer_subgraph)
+g.add_node("human_review", human_review_node)
+g.add_node("publish", publish_node)
 
 g.add_edge(START, "router")
 g.add_conditional_edges("router", route_next, {"research": "research", "orchestrator": "orchestrator"})
@@ -634,8 +703,37 @@ g.add_edge("research", "orchestrator")
 
 g.add_conditional_edges("orchestrator", fanout, ["worker"])
 g.add_edge("worker", "reducer")
-g.add_edge("reducer", END)
+g.add_edge("reducer", "human_review")
+g.add_edge("human_review", "publish")
+g.add_edge("publish", END)
 
-app = g.compile()
-app
+# Export the raw StateGraph — main.py compiles it with a checkpointer
+graph_builder = g
+
+
+# -----------------------------
+# 10) Checkpointer helper
+# -----------------------------
+_checkpointer_instance = None
+
+
+def get_checkpointer():
+    """Lazy-init a PostgresSaver checkpointer using DATABASE_URL.
+
+    Returns None if DATABASE_URL is not set (graph will run without
+    persistence — the interrupt node will raise at runtime).
+    """
+    global _checkpointer_instance
+    if _checkpointer_instance is not None:
+        return _checkpointer_instance
+
+    db_url = os.getenv("DATABASE_URL", "")
+    if not db_url:
+        return None
+
+    from langgraph.checkpoint.postgres import PostgresSaver
+
+    _checkpointer_instance = PostgresSaver.from_conn_string(db_url)
+    _checkpointer_instance.setup()  # Creates checkpoint tables (idempotent)
+    return _checkpointer_instance
 

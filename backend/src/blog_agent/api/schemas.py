@@ -23,6 +23,10 @@ class PublishRequest(BaseModel):
     file_path: Optional[str] = None
 
 
+class ApproveRequest(BaseModel):
+    approved: bool
+
+
 class UpdateRunRequest(BaseModel):
     status: Optional[str] = None
     final_md: Optional[str] = None
@@ -54,11 +58,18 @@ class GenerateResponse(BaseModel):
     plan: Optional[dict] = None
     evidence: Optional[List[dict]] = None
     image_specs: Optional[List[dict]] = None
+    status: Optional[str] = None       # "awaiting_approval" when interrupt is active
+    thread_id: Optional[str] = None    # LangGraph thread ID for resuming
 
 
 class PublishResponse(BaseModel):
     html_url: str
     sha: str
+
+
+class ApproveResponse(BaseModel):
+    status: str          # "published" or "rejected"
+    github_url: str = ""
 
 
 class MessageResponse(BaseModel):
