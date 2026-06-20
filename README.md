@@ -14,21 +14,24 @@ FastAPI Backend  ──►  LangGraph Pipeline
         │              → Orchestrator (with retry)
         │              → Parallel Workers (fan-out via Send)
         │              → Reducer (merge → images)
+        │              → Human Review (interrupt ⏸️)
+        │              → Publish (if approved ✅)
         ▼
 Neon PostgreSQL          GitHub Contents API
-(blog_runs table)        (publish approved posts)
+(blog_runs table +       (publish approved posts)
+ checkpoint storage)
 ```
 
 ## Features
 
-- **Multi-agent pipeline** — Router → Orchestrator → Parallel Section Writers → Reducer, orchestrated with LangGraph
+- **Multi-agent pipeline** — Router → Orchestrator → Parallel Section Writers → Reducer → Human Review → Publish, orchestrated with LangGraph
 - **Fan-out / fan-in** — workers run in parallel via LangGraph `Send()` API
+- **Human-in-the-loop approval** — graph pauses via LangGraph `interrupt()` after blog generation; user approves or rejects via `POST /api/runs/{id}/approve`, which resumes the graph with `Command(resume=...)`
+- **Integrated GitHub publishing** — approved posts are pushed to GitHub directly from within the LangGraph pipeline (no separate publish call needed)
 - **Local RAG Grounding** — upload local reference drafts, notes, or APIs via React UI to ground new posts in private or complex domain knowledge
 - **Live web research** — optional Tavily search with citations
-- **Human-in-the-loop (HITL)** — review, approve, or request rewrites before publishing
 - **LLM-based rewriter** — revise blog with natural language feedback
-- **GitHub publishing** — push approved posts directly to a GitHub repo via Contents API
-- **Neon PostgreSQL persistence** — all runs stored with full history
+- **Neon PostgreSQL persistence** — all runs stored with full history; LangGraph checkpoints persisted via `PostgresSaver`
 - **AI image generation** — automatic image planning with graceful fallback on failure
 - **Retry-resilient LLM calls** — structured output calls retry on validation failures
 - **Frontend** — React + TypeScript + Vite, served via nginx in production
@@ -42,13 +45,13 @@ blog-writing-agent/
 ├── backend/
 │   ├── src/
 │   │   └── blog_agent/
-│   │       ├── agent.py              # LangGraph pipeline (router, orchestrator, workers, reducer)
-│   │       ├── database.py           # Neon PostgreSQL persistence
+│   │       ├── agent.py              # LangGraph pipeline (router, orchestrator, workers, reducer, human_review, publish)
+│   │       ├── database.py           # Neon PostgreSQL persistence (blog_runs + thread_id)
 │   │       ├── github_publisher.py   # GitHub Contents API integration
 │   │       ├── rewriter.py           # LLM-based blog rewriter
 │   │       ├── rag.py                # Local reference document RAG indexing & querying
 │   │       └── api/
-│   │           ├── main.py           # FastAPI app (10 endpoints)
+│   │           ├── main.py           # FastAPI app (11 endpoints, interrupt/resume support)
 │   │           └── schemas.py        # Pydantic request/response models
 │   ├── storage/                      # Local database and document storage
 │   │   ├── chroma_db/                # Chroma SQLite collection files
@@ -116,15 +119,35 @@ VITE_API_URL=http://localhost:8000 npm run dev
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/api/health` | Health check |
-| `POST` | `/api/generate` | Run the blog agent (supports optional local RAG) |
+| `POST` | `/api/generate` | Run the blog agent; returns `status: "awaiting_approval"` + `thread_id` at the interrupt point |
+| `POST` | `/api/runs/{id}/approve` | Resume the paused graph with `{"approved": true/false}` — publishes to GitHub if approved |
 | `GET` | `/api/runs` | List all past runs |
 | `GET` | `/api/runs/{id}` | Get a single run |
 | `PATCH` | `/api/runs/{id}` | Update run fields |
 | `POST` | `/api/runs/{id}/rewrite` | Rewrite with feedback |
-| `POST` | `/api/runs/{id}/publish` | Publish to GitHub |
+| `POST` | `/api/runs/{id}/publish` | ~~Publish to GitHub~~ *(deprecated — use `/approve` instead)* |
 | `GET` | `/api/rag/files` | List all uploaded reference documents |
 | `POST` | `/api/rag/upload` | Upload and index a reference document (supports .md, .txt, .html) |
 | `DELETE` | `/api/rag/files/{filename}` | Delete reference document from storage and purge database vectors |
+
+### Two-Phase Generate → Approve Flow
+
+```
+1. POST /api/generate {"topic": "..."}
+   → Pipeline runs: Router → Research → Orchestrator → Workers → Reducer
+   → Graph pauses at human_review node (interrupt)
+   → Response: {final_md, status: "awaiting_approval", thread_id, run_id}
+
+2. POST /api/runs/{id}/approve {"approved": true}
+   → Graph resumes → publish node pushes to GitHub
+   → Response: {status: "published", github_url: "https://..."}
+
+   OR
+
+2. POST /api/runs/{id}/approve {"approved": false}
+   → Graph ends without publishing
+   → Response: {status: "rejected", github_url: ""}
+```
 
 ## Environment Variables
 
